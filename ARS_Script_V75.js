@@ -31,6 +31,100 @@ function _exifCmd(exe, mp4, meta){
     return args.join(" ");
 }
 
+function buildMetaFromPlan(p){
+    if(!p) return {};
+    var title=(p.fileName||"").replace(/\.mp4$/i,"");
+    var human="Creator: "+(p.initials||"")+" | Game: "+(p.game||"")+" | Type: "+(p.videoType||"")+" | Rushes: "+(p.rushes||"-")+" | Lang: "+(p.lang||"")+" | Number: "+(p.number||"")+" | Duration: "+(p.durationHuman||"")+" | MetaType: "+(p.type2||"")+" | Intention: "+(p.intention||"")+" | Direction: "+(p.direction||"");
+    return {
+        AuthorInitials:p.initials,
+        GameCode:p.game,
+        VideoType:p.videoType,
+        Number:p.number,
+        Rushes:p.rushes,
+        Resolution:p.resolution,
+        Language:p.lang,
+        DurationSec:p.durationSec,
+        ARSSuiteVersion:"v75",
+        ExportDate:_iso(),
+        Type:p.type2,
+        Intention:p.intention,
+        Direction:p.direction,
+        HumanTitle:title,
+        __Comment:human
+    };
+}
+
+function embedMetadataForPlan(exiftoolPath, plan){
+    if(!exiftoolPath||!plan||!plan.outFile) return;
+    try{
+        var meta=buildMetaFromPlan(plan);
+        var cmd=_exifCmd(exiftoolPath, plan.outFile.fsName, meta);
+        system.callSystem(cmd);
+    }catch(err){}
+}
+
+function pruneAMEWatchEntry(watch, path){
+    if(!watch||!watch.items||!watch.items.length||!path) return;
+    var kept=[];
+    for(var i=0;i<watch.items.length;i++){
+        var entry=watch.items[i];
+        if(!entry||entry.path===path) continue;
+        kept.push(entry);
+    }
+    watch.items=kept;
+}
+
+function scheduleAMEMetadata(plans, exiftoolPath){
+    if(!exiftoolPath||!plans||!plans.length) return;
+    if(!$.global.__arsAMEWatch) $.global.__arsAMEWatch={items:[], active:false, interval:1500};
+    var watch=$.global.__arsAMEWatch;
+    var now=(new Date()).getTime();
+    for(var i=0;i<plans.length;i++){
+        var plan=plans[i];
+        var path=(plan && plan.outFile)?plan.outFile.fsName:null;
+        if(!path) continue;
+        pruneAMEWatchEntry(watch, path);
+        watch.items.push({ plan:plan, path:path, exif:exiftoolPath, lastSize:-1, stable:0, deadline:now+1800*1000 });
+    }
+    if(!$.global.__arsPollAME){
+        $.global.__arsPollAME=function(){
+            var watcher=$.global.__arsAMEWatch;
+            if(!watcher||!watcher.items||watcher.items.length===0){ if(watcher) watcher.active=false; return; }
+            var remaining=[];
+            var current=(new Date()).getTime();
+            for(var idx=0; idx<watcher.items.length; idx++){
+                var entry=watcher.items[idx];
+                if(!entry||!entry.path||current>entry.deadline) continue;
+                var f=new File(entry.path);
+                if(f.exists){
+                    var sz=f.length;
+                    if(sz>0 && sz===entry.lastSize){
+                        entry.stable++;
+                    } else {
+                        entry.stable=0;
+                        entry.lastSize=sz;
+                    }
+                    if(entry.stable>=3){
+                        embedMetadataForPlan(entry.exif, entry.plan);
+                        continue;
+                    }
+                }
+                remaining.push(entry);
+            }
+            watcher.items=remaining;
+            if(remaining.length>0){
+                app.scheduleTask("__arsPollAME()", watcher.interval, false);
+            } else {
+                watcher.active=false;
+            }
+        };
+    }
+    if(!watch.active){
+        watch.active=true;
+        app.scheduleTask("__arsPollAME()", watch.interval, false);
+    }
+}
+
 (function(){
     var win=new Window("palette","ARS Suite v75",undefined,{resizeable:true});
     win.orientation="row"; win.alignChildren="fill";
@@ -125,7 +219,7 @@ function _exifCmd(exe, mp4, meta){
             var mUGC = nm.match(/\bUGC\d+\b/g); if(mUGC) for(var j3=0;j3<mUGC.length;j3++) pushU(rushExtra,mUGC[j3]);
             var mHOOK = nm.match(/\bHOOK\d+\b/g); if(mHOOK) for(var j4=0;j4<mHOOK.length;j4++) pushU(rushExtra,mHOOK[j4]);
         }
-        function scanComp(c, depth){ if(!c||depth>2) return; scanName(c.name); try{ for(var i=1;i<=c.numLayers;i++){ varlyr=c.layer(i); scanName(varlyr.name); if(varlyr instanceof AVLayer && varlyr.source){ scanName(varlyr.source.name); if(varlyr.source instanceof CompItem) scanComp(varlyr.source, depth+1); } } }catch(e){}
+        function scanComp(c, depth){ if(!c||depth>2) return; scanName(c.name); try{ for(var i=1;i<=c.numLayers;i++){ var lyr=c.layer(i); scanName(lyr.name); if(lyr instanceof AVLayer && lyr.source){ scanName(lyr.source.name); if(lyr.source instanceof CompItem) scanComp(lyr.source, depth+1); } } }catch(e){}
         }
         scanComp(comp,0);
         rushAA.sort();
@@ -170,17 +264,17 @@ function _exifCmd(exe, mp4, meta){
             rqItem.outputModule(1).file=pq.outFile;
         }
         // Trigger once
-        if(renderer==="Media Encoder") app.project.renderQueue.queueInAME(true); else app.project.renderQueue.render();
-        // EXIF per file (poll until stable)
-        if(exiftoolPath){
-            for(var j=0;j<plans.length;j++){
-                var p=plans[j];
-                _waitStable(p.outFile.fsName, 1800, 1500, 3);
-                try{
-                    var meta={ AuthorInitials:p.initials, GameCode:p.game, VideoType:p.videoType, Number:p.number, Rushes:p.rushes, Resolution:p.resolution, Language:p.lang, DurationSec:p.durationSec, ARSSuiteVersion:"v75", ExportDate:_iso(), Type:p.type2, Intention:p.intention, Direction:p.direction, HumanTitle:p.fileName.replace(/\.mp4$/i,"") , __Comment:("Creator: "+p.initials+" | Game: "+p.game+" | Type: "+p.videoType+" | Rushes: "+(p.rushes||"-")+" | Lang: "+p.lang+" | Number: "+p.number+" | Duration: "+p.durationHuman+" | MetaType: "+p.type2+" | Intention: "+p.intention+" | Direction: "+p.direction) };
-                    var cmd=_exifCmd(exiftoolPath, p.outFile.fsName, meta);
-                    var out=system.callSystem(cmd);
-                }catch(ex){}
+        if(renderer==="Media Encoder"){
+            app.project.renderQueue.queueInAME(true);
+            scheduleAMEMetadata(plans, exiftoolPath);
+        } else {
+            app.project.renderQueue.render();
+            if(exiftoolPath){
+                for(var j=0;j<plans.length;j++){
+                    var p=plans[j];
+                    _waitStable(p.outFile.fsName, 1800, 1500, 3);
+                    embedMetadataForPlan(exiftoolPath, p);
+                }
             }
         }
     }
